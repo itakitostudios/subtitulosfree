@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Subtitulos animados</title>
+<style>
+body{font-family:Segoe UI,sans-serif;background:#111;color:#eee;margin:0;padding:16px}
+.wrap{max-width:980px;margin:auto}
+.panel{display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:#1b1b1b;padding:10px;border-radius:8px;margin:10px 0}
+.panel label{font-size:13px;color:#bbb;display:flex;align-items:center;gap:4px}
+button{background:#0078d4;color:#fff;border:none;padding:8px 12px;border-radius:4px;cursor:pointer}
+button:disabled{background:#555;cursor:default}
+select,input[type=number]{background:#2b2b2b;color:#eee;border:1px solid #444;padding:6px;border-radius:4px}
+input[type=color]{width:42px;height:32px;border:none;background:none;padding:0}
+#lienzo{width:100%;height:auto;background:#000;border-radius:8px;display:block}
+#estado,#estadoExp{color:#aaa;font-size:14px}
+</style></head>
+<body>
+<div class="wrap">
+<h2>Subtitulos animados gratis</h2>
+<p style="color:#aaa;font-size:14px">Todo corre en tu navegador. El video no se sube a ningun lado.</p>
+
+<div class="panel">
+<input type="file" id="archivo" accept="video/*">
+<label>Modelo <select id="modelo"><option value="Xenova/whisper-tiny">tiny (rapido)</option><option value="Xenova/whisper-base" selected>base</option><option value="Xenova/whisper-small">small (preciso)</option></select></label>
+<button id="transcribir">Generar subtitulos</button>
+<span id="estado"></span>
+</div>
+
+<canvas id="lienzo" width="640" height="360"></canvas>
+
+<div class="panel">
+<button id="play">Reproducir</button>
+<input type="range" id="barra" min="0" max="100" step="0.01" value="0" style="flex:1">
+<span id="tiempo">0.0 s</span>
+</div>
+
+<div class="panel">
+<label>Recortar desde <input type="number" id="inicio" min="0" step="0.1" value="0" style="width:80px"> s</label>
+<button id="marcarInicio">Usar actual</button>
+<label>hasta <input type="number" id="fin" min="0" step="0.1" value="0" style="width:80px"> s</label>
+<button id="marcarFin">Usar actual</button>
+<button id="verRecorte">Ir al inicio del recorte</button>
+</div>
+
+<div class="panel">
+<label>Estilo <select id="estilo"><option value="clasico">Clasico</option><option value="neon">Neon</option><option value="caja">Caja</option><option value="contorno">Contorno</option><option value="tarjeta">Tarjeta</option><option value="karaoke">Karaoke</option></select></label>
+<label>Entrada <select id="entrada"><option value="fade">Fade</option><option value="pop">Pop</option><option value="subir">Subir</option><option value="caer">Caer</option><option value="maquina">Maquina de escribir</option><option value="ninguna">Ninguna</option></select></label>
+<label>Palabra <select id="palabraAnim"><option value="crecer">Crecer</option><option value="vibrar">Vibrar</option><option value="ola">Ola</option><option value="ninguna">Ninguna</option></select></label>
+<label>Posicion <select id="posicion"><option value="abajo">Abajo</option><option value="centro">Centro</option><option value="arriba">Arriba</option></select></label>
+<label>Tamano <input type="range" id="tamano" min="2" max="8" step="0.5" value="4" style="width:90px"></label>
+<label>Activa <input type="color" id="colorActiva" value="#ffd400"></label>
+<label>Base <input type="color" id="colorBase" value="#ffffff"></label>
+<label>Fondo <input type="color" id="colorFondo" value="#000000"></label>
+<label><input type="checkbox" id="mayus"> Mayusculas</label>
+</div>
+
+<div class="panel">
+<button id="exportar" disabled>Exportar video con subtitulos</button>
+<button id="srt" disabled>Descargar .srt</button>
+<span id="estadoExp"></span>
+</div>
+</div>
+
+<script type="module">
+import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0";
+env.allowLocalModels = false;
+
+const $ = id => document.getElementById(id);
+const cv = $("lienzo"), ctx = cv.getContext("2d");
+const video = document.createElement("video");
+video.playsInline = true;
+video.preload = "auto";
+
+let segmentos = [], asr = null, modeloCargado = "", duracion = 0;
+let ctxAudio = null, destino = null;
+
+function finRecorte() { return parseFloat($("fin").value) || duracion; }
+function inicioRecorte() { return parseFloat($("inicio").value) || 0; }
+
+$("archivo").onchange = () => {
+  const f = $("archivo").files[0];
+  if (!f) return;
+  video.src = URL.createObjectURL(f);
+  video.onloadedmetadata = () => {
+    cv.width = Math.min(video.videoWidth, 1280);
+    cv.height = Math.round(cv.width * video.videoHeight / video.videoWidth);
+    duracion = video.duration;
+    $("barra").max = duracion;
+    $("fin").value = duracion.toFixed(1);
+    $("inicio").value = "0";
+    $("exportar").disabled = false;
+    $("estado").textContent = "Video cargado (" + duracion.toFixed(1) + " s)";
+  };
+};
+
+function iniciarAudio() {
+  if (ctxAudio) return;
+  ctxAudio = new AudioContext();
+  const fuente = ctxAudio.createMediaElementSource(video);
+  destino = ctxAudio.createMediaStreamDestination();
+  fuente.connect(ctxAudio.destination);
+  fuente.connect(destino);
+}
+
+$("play").onclick = async () => {
+  iniciarAudio();
+  await ctxAudio.resume();
+  if (video.paused) {
+    if (video.currentTime >= finRecorte() || video.currentTime < inicioRecorte()) video.currentTime = inicioRecorte();
+    video.play();
+    $("play").textContent = "Pausar";
+  } else {
+    video.pause();
+    $("play").textContent = "Reproducir";
+  }
+};
+
+$("barra").oninput = () => { video.currentTime = parseFloat($("barra").value); };
+$("marcarInicio").onclick = () => { $("inicio").value = video.currentTime.toFixed(1); };
+$("marcarFin").onclick = () => { $("fin").value = video.currentTime.toFixed(1); };
+$("verRecorte").onclick = () => { video.currentTime = inicioRecorte(); };
+
+function redondo(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function pintarSubtitulos(t) {
+  const seg = segmentos.find(s => t >= s.i && t <= s.f + 0.6);
+  if (!seg) return;
+  const W = cv.width, H = cv.height;
+  const tam = Math.round(H * parseFloat($("tamano").value) / 100);
+  const estilo = $("estilo").value, entrada = $("entrada").value, anim = $("palabraAnim").value;
+  const base = $("colorBase").value, act = $("colorActiva").value, fondo = $("colorFondo").value;
+  const pos = $("posicion").value;
+  const yCentro = pos === "arriba" ? H * 0.2 : pos === "centro" ? H * 0.5 : H * 0.8;
+
+  ctx.font = "700 " + tam + "px 'Segoe UI', Arial, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
+  ctx.lineJoin = "round";
+
+  const el = t - seg.i;
+  const p = Math.min(1, Math.max(0, el / 0.35));
+  const ease = 1 - Math.pow(1 - p, 3);
+  let alpha = 1, dy = 0, escala = 1, visibles = seg.palabras.length;
+  if (entrada === "fade") alpha = ease;
+  if (entrada === "pop") { alpha = ease; escala = ease < 1 ? 0.6 + 0.4 * ease + 0.08 * Math.sin(p * Math.PI) : 1; }
+  if (entrada === "subir") { alpha = ease; dy = (1 - ease) * H * 0.05; }
+  if (entrada === "caer") { alpha = ease; dy = -(1 - ease) * H * 0.06; }
+  if (entrada === "maquina") visibles = Math.floor(el / 0.12) + 1;
+
+  const textos = seg.palabras.map(w => $("mayus").checked ? w.t.toUpperCase() : w.t);
+  const espacio = ctx.measureText(" ").width;
+  const maxW = W * 0.9;
+  const lineas = [];
+  let linea = [], ancho = 0;
+  seg.palabras.forEach((w, k) => {
+    const tw = ctx.measureText(textos[k]).width;
+    const nuevo = linea.length ? ancho + espacio + tw : tw;
+    if (linea.length && nuevo > maxW) { lineas.push(linea); linea = []; ancho = 0; }
+    ancho = linea.length ? ancho + espacio + tw : tw;
+    linea.push({ txt: textos[k], w: tw, k, p: w });
+  });
+  if (linea.length) lineas.push(linea);
+
+  const altoLinea = tam * 1.25;
+  const yInicio = yCentro + dy - ((lineas.length - 1) * altoLinea) / 2;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  lineas.forEach((ln, li) => {
+    const anchoTotal = ln.reduce((a, o, idx) => a + o.w + (idx ? espacio : 0), 0);
+    let x = W / 2 - anchoTotal / 2;
+    const y = yInicio + li * altoLinea;
+    if (estilo === "tarjeta") {
+      ctx.save();
+      ctx.globalAlpha = alpha * 0.75;
+      ctx.fillStyle = fondo;
+      redondo(x - tam * 0.5, y - tam * 0.7, anchoTotal + tam, tam * 1.4, tam * 0.3);
+      ctx.fill();
+      ctx.restore();
+    }
+    ln.forEach(o => {
+      if (o.k >= visibles) { x += o.w + espacio; return; }
+      const activa = t >= o.p.i && t <= o.p.f;
+      let s = escala, dyw = 0, dxw = 0;
+      if (anim === "crecer" && activa) s *= 1.25;
+      if (anim === "vibrar" && activa) dxw = Math.sin(t * 50) * tam * 0.06;
+      if (anim === "ola") dyw = Math.sin(t * 8 + o.k * 0.9) * tam * 0.15;
+
+      let colorTxt = activa ? act : base;
+      if (estilo === "karaoke" && !activa) colorTxt = "#888";
+      if (estilo === "caja") colorTxt = activa ? "#fff" : base;
+
+      ctx.save();
+      ctx.translate(x + o.w / 2 + dxw, y + dyw);
+      ctx.scale(s, s);
+      if (estilo === "caja") {
+        ctx.fillStyle = activa ? act : fondo;
+        redondo(-o.w / 2 - tam * 0.2, -tam * 0.6, o.w + tam * 0.4, tam * 1.2, tam * 0.25);
+        ctx.fill();
+      }
+      if (estilo === "clasico") {
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = tam * 0.12;
+        ctx.strokeText(o.txt, 0, 0);
+      }
+      if (estilo === "contorno") {
+        ctx.strokeStyle = colorTxt;
+        ctx.lineWidth = tam * 0.18;
+        ctx.strokeText(o.txt, 0, 0);
+      }
+      if (estilo === "neon") { ctx.shadowColor = act; ctx.shadowBlur = tam * 0.6; }
+      if (estilo === "karaoke" && activa) { ctx.shadowColor = act; ctx.shadowBlur = tam * 0.4; }
+      ctx.fillStyle = estilo === "contorno" ? fondo : colorTxt;
+      ctx.fillText(o.txt, 0, 0);
+      ctx.restore();
+      x += o.w + espacio;
+    });
+  });
+  ctx.restore();
+}
+
+function bucle() {
+  if (video.readyState >= 2) {
+    ctx.drawImage(video, 0, 0, cv.width, cv.height);
+    pintarSubtitulos(video.currentTime);
+  }
+  if (!video.paused && video.currentTime >= finRecorte()) {
+    video.pause();
+    $("play").textContent = "Reproducir";
+  }
+  if (document.activeElement !== $("barra")) $("barra").value = video.currentTime;
+  $("tiempo").textContent = video.currentTime.toFixed(1) + " s";
+  requestAnimationFrame(bucle);
+}
+requestAnimationFrame(bucle);
+
+async function cargarModelo(nombre) {
+  if (asr && modeloCargado === nombre) return asr;
+  $("estado").textContent = "Cargando modelo... (la primera vez tarda)";
+  try {
+    asr = await pipeline("automatic-speech-recognition", nombre, { device: "webgpu", dtype: "fp32" });
+  } catch (e) {
+    asr = await pipeline("automatic-speech-recognition", nombre, { device: "wasm" });
+  }
+  modeloCargado = nombre;
+  return asr;
+}
+
+async function audioDe(file) {
+  const c = new AudioContext({ sampleRate: 16000 });
+  const buf = await c.decodeAudioData(await file.arrayBuffer());
+  const datos = buf.getChannelData(0);
+  c.close();
+  return datos;
+}
+
+function agrupar(chunks) {
+  const segs = [];
+  let actual = null;
+  chunks.forEach(c => {
+    const t = (c.text || "").trim();
+    if (!t) return;
+    const i = c.timestamp[0] ?? 0;
+    const f = c.timestamp[1] ?? i + 0.3;
+    if (!actual || actual.palabras.length >= 6 || i - actual.f > 0.8) {
+      actual = { i, f, palabras: [], texto: "" };
+      segs.push(actual);
+    }
+    actual.palabras.push({ t, i, f });
+    actual.f = f;
+    actual.texto = actual.palabras.map(p => p.t).join(" ");
+  });
+  return segs;
+}
+
+$("transcribir").onclick = async () => {
+  const f = $("archivo").files[0];
+  if (!f) { $("estado").textContent = "Elige un video primero"; return; }
+  $("transcribir").disabled = true;
+  $("srt").disabled = true;
+  try {
+    const modelo = await cargarModelo($("modelo").value);
+    $("estado").textContent = "Preparando audio...";
+    const audio = await audioDe(f);
+    $("estado").textContent = "Transcribiendo... puede tardar varios minutos";
+    const out = await modelo(audio, { return_timestamps: "word", chunk_length_s: 30, stride_length_s: 5 });
+    if (!out.chunks) throw new Error("el modelo no devolvio tiempos por palabra");
+    segmentos = agrupar(out.chunks);
+    $("estado").textContent = "Listo: " + segmentos.length + " lineas";
+    $("srt").disabled = false;
+  } catch (e) {
+    $("estado").textContent = "Error: " + e.message;
+  }
+  $("transcribir").disabled = false;
+};
+
+function tiempoSrt(t) {
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = Math.floor(t % 60);
+  const ms = Math.round((t % 1) * 1000);
+  return [h, m, s].map(v => String(v).padStart(2, "0")).join(":") + "," + String(ms).padStart(3, "0");
+}
+
+$("srt").onclick = () => {
+  const ini = inicioRecorte();
+  let out = "", n = 1;
+  segmentos.filter(s => s.f > ini).forEach(s => {
+    out += n++ + "\n" + tiempoSrt(Math.max(0, s.i - ini)) + " --> " + tiempoSrt(s.f - ini) + "\n" + s.texto + "\n\n";
+  });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([out], { type: "text/plain" }));
+  a.download = "subtitulos.srt";
+  a.click();
+};
+
+$("exportar").onclick = async () => {
+  const ini = inicioRecorte(), fin = finRecorte();
+  if (fin <= ini) { $("estadoExp").textContent = "El fin debe ser mayor que el inicio"; return; }
+  iniciarAudio();
+  await ctxAudio.resume();
+  video.pause();
+  $("play").textContent = "Reproducir";
+  $("exportar").disabled = true;
+  $("estadoExp").textContent = "Grabando... dura lo mismo que el recorte. No cambies de pestaña.";
+
+  const seeked = new Promise(r => video.addEventListener("seeked", r, { once: true }));
+  video.currentTime = ini;
+  await seeked;
+
+  const flujo = cv.captureStream(30);
+  destino.stream.getAudioTracks().forEach(t => flujo.addTrack(t));
+  const tipo = MediaRecorder.isTypeSupported("video/mp4") ? "video/mp4" : "video/webm";
+  const grabador = new MediaRecorder(flujo, { mimeType: tipo });
+  const trozos = [];
+  grabador.ondataavailable = e => { if (e.data.size) trozos.push(e.data); };
+  grabador.onstop = () => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob(trozos, { type: tipo }));
+    a.download = "video-subtitulos" + (tipo.includes("mp4") ? ".mp4" : ".webm");
+    a.click();
+    video.pause();
+    $("estadoExp").textContent = "Listo, se descargo el video";
+    $("exportar").disabled = false;
+  };
+
+  grabador.start(1000);
+  await video.play();
+  const vigilar = () => {
+    if (video.currentTime >= fin || video.ended || video.paused) {
+      video.pause();
+      grabador.stop();
+      return;
+    }
+    requestAnimationFrame(vigilar);
+  };
+  vigilar();
+};
+</script>
+</body></html>
