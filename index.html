@@ -95,7 +95,7 @@ function redondo(x, y, w, h, r) {
 }
 
 function pintarSubtitulos(t) {
-  const seg = segmentos.find(s => t >= s.i && t <= s.f + 0.6);
+  const seg = segmentos.find(s => t >= s.i - 0.05 && t <= s.f + 0.25);
   if (!seg) return;
   const W = cv.width, H = cv.height;
   const tam = Math.round(H * parseFloat($("tamano").value) / 100);
@@ -176,13 +176,13 @@ function pintarSubtitulos(t) {
         ctx.strokeText(o.txt, 0, 0);
       }
       if (estilo === "contorno") {
-        ctx.strokeStyle = colorTxt;
+        ctx.strokeStyle = fondo;
         ctx.lineWidth = tam * 0.18;
         ctx.strokeText(o.txt, 0, 0);
       }
       if (estilo === "neon") { ctx.shadowColor = act; ctx.shadowBlur = tam * 0.6; }
       if (estilo === "karaoke" && activa) { ctx.shadowColor = act; ctx.shadowBlur = tam * 0.4; }
-      ctx.fillStyle = estilo === "contorno" ? fondo : colorTxt;
+      ctx.fillStyle = colorTxt;
       ctx.fillText(o.txt, 0, 0);
       ctx.restore();
       x += o.w + espacio;
@@ -238,7 +238,8 @@ function agrupar(chunks) {
     const t = (c.text || "").trim();
     if (!t) return;
     const i = c.timestamp[0] ?? 0;
-    const f = c.timestamp[1] ?? i + 0.3;
+    let f = c.timestamp[1] ?? i + 0.4;
+    if (f - i > 2.5 || f < i) f = i + 0.6;
     if (!actual || actual.palabras.length >= 6 || i - actual.f > 0.8) {
       actual = { i, f, palabras: [], texto: "" };
       segs.push(actual);
@@ -306,6 +307,10 @@ $("exportar").onclick = async () => {
     actx.close();
     const ch = Math.min(buf.numberOfChannels, 2), sr = buf.sampleRate;
 
+    const config = { codec: "mp4a.40.2", sampleRate: sr, numberOfChannels: ch, bitrate: 128000 };
+    const soporte = await AudioEncoder.isConfigSupported(config);
+    if (!soporte.supported) throw new Error("este navegador no puede codificar audio AAC. Usa Chrome o Edge actualizado");
+
     const muxer = new Mp4Muxer.Muxer({
       target: new Mp4Muxer.ArrayBufferTarget(),
       video: { codec: "avc", width: W, height: H },
@@ -313,8 +318,13 @@ $("exportar").onclick = async () => {
       fastStart: "in-memory"
     });
 
-    const aenc = new AudioEncoder({ output: (c, m) => muxer.addAudioChunk(c, m), error: e => console.error(e) });
-    aenc.configure({ codec: "mp4a.40.2", sampleRate: sr, numberOfChannels: ch, bitrate: 128000 });
+    let errorAudio = null, errorVideo = null;
+    const aenc = new AudioEncoder({
+      output: (c, m) => muxer.addAudioChunk(c, m),
+      error: e => { errorAudio = e; }
+    });
+    aenc.configure(config);
+
     const s0 = Math.floor(ini * sr), s1 = Math.min(buf.length, Math.floor(fin * sr));
     const canales = [];
     for (let c = 0; c < ch; c++) canales.push(buf.getChannelData(c));
@@ -331,8 +341,12 @@ $("exportar").onclick = async () => {
       ad.close();
     }
     await aenc.flush();
+    if (errorAudio) throw new Error("fallo el audio: " + errorAudio.message);
 
-    const venc = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: e => console.error(e) });
+    const venc = new VideoEncoder({
+      output: (c, m) => muxer.addVideoChunk(c, m),
+      error: e => { errorVideo = e; }
+    });
     venc.configure({ codec: "avc1.640028", width: W, height: H, bitrate: 4000000, framerate: fps });
     const total = Math.round((fin - ini) * fps);
     for (let k = 0; k < total; k++) {
@@ -347,6 +361,7 @@ $("exportar").onclick = async () => {
       $("estadoExp").textContent = "Exportando " + (k + 1) + " / " + total;
     }
     await venc.flush();
+    if (errorVideo) throw new Error("fallo el video: " + errorVideo.message);
     muxer.finalize();
 
     const blob = new Blob([muxer.target.buffer], { type: "video/mp4" });
